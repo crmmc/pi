@@ -38,6 +38,11 @@ function packageDependencies(entry) {
 	};
 }
 
+function dependencyQueueItems(entry, from) {
+	const optionalNames = new Set(Object.keys(entry.optionalDependencies ?? {}));
+	return Object.keys(packageDependencies(entry)).map((name) => ({ name, from, optional: optionalNames.has(name) }));
+}
+
 function sortedObject(object) {
 	return Object.fromEntries(Object.entries(object).sort(([a], [b]) => a.localeCompare(b)));
 }
@@ -194,18 +199,16 @@ function resolveExternalDependency(lockPackages, packageName, fromLockPath) {
 	);
 }
 
-function addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, name, workspace) {
+function addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, name, workspace, optional) {
 	const packageJson = workspace.packageJson;
 	const outputPath = `node_modules/${name}`;
 	const entry = copyPackageJsonEntry(packageJson, { includeName: false });
 	entry.resolved = registryTarballUrl(name, packageJson.version);
+	if (optional) entry.optional = true;
 
 	shrinkwrapPackages[outputPath] = sortedPackageEntry(entry);
 	addedPaths.add(outputPath);
-
-	for (const dependencyName of Object.keys(packageDependencies(packageJson))) {
-		queue.push({ name: dependencyName, from: outputPath });
-	}
+	queue.push(...dependencyQueueItems(packageJson, outputPath));
 }
 
 function addExternalPackage(lockPackages, shrinkwrapPackages, addedPaths, queue, name, from) {
@@ -303,7 +306,7 @@ function generateShrinkwrap() {
 	};
 	const addedPaths = new Set([""]);
 	const internalNames = new Set();
-	const queue = Object.keys(packageDependencies(codingAgentPackage)).map((name) => ({ name, from: "" }));
+	const queue = dependencyQueueItems(codingAgentPackage, "");
 
 	while (queue.length > 0) {
 		const item = queue.shift();
@@ -316,7 +319,7 @@ function generateShrinkwrap() {
 			const outputPath = `node_modules/${item.name}`;
 			internalNames.add(item.name);
 			if (!addedPaths.has(outputPath)) {
-				addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, item.name, workspace);
+				addInternalWorkspace(shrinkwrapPackages, addedPaths, queue, item.name, workspace, item.optional);
 			}
 			continue;
 		}

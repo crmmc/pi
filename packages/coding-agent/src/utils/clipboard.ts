@@ -1,7 +1,7 @@
 import { type ExecFileSyncOptionsWithStringEncoding, execFileSync, execSync, spawn } from "child_process";
 import { platform } from "os";
 import { isWaylandSession } from "./clipboard-image.ts";
-import { clipboard } from "./clipboard-native.ts";
+import { getClipboardReader, getClipboardWriter } from "./clipboard-native.ts";
 
 type NativeClipboardExecOptions = {
 	input: string;
@@ -40,30 +40,50 @@ const READ_CLIPBOARD_OPTIONS: ExecFileSyncOptionsWithStringEncoding = {
 	timeout: 5000,
 };
 
-function readWaylandClipboardText(): ClipboardReadResult {
+function readClipboardTextCommand(command: string, args: readonly string[]): ClipboardReadResult {
 	try {
-		const text = execFileSync("wl-paste", ["--no-newline", "--type", "text"], READ_CLIPBOARD_OPTIONS);
+		const text = execFileSync(command, args, READ_CLIPBOARD_OPTIONS);
 		return { ok: true, text: text || null };
 	} catch {
 		return { ok: false };
 	}
 }
 
+function readX11ClipboardText(): ClipboardReadResult {
+	for (const [command, args] of [
+		["xclip", ["-selection", "clipboard", "-out"]],
+		["xsel", ["--clipboard", "--output"]],
+	] as const) {
+		const result = readClipboardTextCommand(command, args);
+		if (result.ok) return result;
+	}
+	return { ok: false };
+}
+
 /** Read plain text from the system clipboard. */
 export async function readClipboardText(): Promise<string | null> {
-	if (platform() === "linux" && isWaylandSession() && process.env.WAYLAND_DISPLAY) {
-		const result = readWaylandClipboardText();
-		if (result.ok) {
-			return result.text;
+	if (platform() === "linux") {
+		if (process.env.TERMUX_VERSION) {
+			const result = readClipboardTextCommand("termux-clipboard-get", []);
+			if (result.ok) return result.text;
+		}
+
+		if (isWaylandSession() && process.env.WAYLAND_DISPLAY) {
+			const result = readClipboardTextCommand("wl-paste", ["--no-newline", "--type", "text"]);
+			if (result.ok) return result.text;
+		}
+
+		if (process.env.DISPLAY) {
+			const result = readX11ClipboardText();
+			if (result.ok) return result.text;
 		}
 	}
 
-	if (!clipboard) {
-		return null;
-	}
+	const clipboardReader = getClipboardReader();
+	if (!clipboardReader) return null;
 
 	try {
-		const text = await clipboard.getText();
+		const text = await clipboardReader.getText();
 		return text || null;
 	} catch {
 		return null;
@@ -79,16 +99,15 @@ export async function copyToClipboard(text: string): Promise<void> {
 	// write the same native clipboard concurrently with the addon, and very large
 	// OSC 52 payloads can desynchronize terminal rendering.
 	//
-	// On Linux, skip the native addon. The underlying `clipboard-rs` crate is
-	// X11-only and does not retain selection ownership after `set_text`
-	// resolves, so on Wayland-only compositors (Hyprland, Niri, ...) and even
-	// some X11 sessions the call resolves successfully without populating the
-	// clipboard. The platform tools below (wl-copy, xclip, xsel) properly
-	// daemonize and keep ownership.
+	// On Linux, platform tools (wl-copy, xclip, and xsel) daemonize and retain
+	// clipboard selection ownership after this function returns.
 	try {
-		if (clipboard && p !== "linux") {
-			await clipboard.setText(text);
-			copied = true;
+		if (p !== "linux") {
+			const clipboardWriter = getClipboardWriter();
+			if (clipboardWriter) {
+				await clipboardWriter.setText(text);
+				copied = true;
+			}
 		}
 	} catch {
 		// Fall through to platform-specific clipboard tools.

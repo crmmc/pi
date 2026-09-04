@@ -4,7 +4,8 @@ import { readFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { clipboard } from "./clipboard-native.ts";
+import { getClipboardReader } from "./clipboard-native.ts";
+import { detectSupportedImageMimeType } from "./mime.ts";
 import { loadPhoton } from "./photon.ts";
 
 export type ClipboardImage = {
@@ -238,17 +239,14 @@ function readClipboardImageViaXclip(): ClipboardImage | null {
 }
 
 async function readClipboardImageViaNativeClipboard(): Promise<ClipboardImage | null> {
-	if (!clipboard || !clipboard.hasImage()) {
-		return null;
-	}
+	const clipboardReader = getClipboardReader();
+	if (!clipboardReader?.hasImage()) return null;
 
-	const imageData = await clipboard.getImageBinary();
-	if (!imageData || imageData.length === 0) {
-		return null;
-	}
+	const imageData = await clipboardReader.getImageBinary();
+	if (!imageData || imageData.length === 0) return null;
 
 	const bytes = imageData instanceof Uint8Array ? imageData : Uint8Array.from(imageData);
-	return { bytes, mimeType: "image/png" };
+	return { bytes, mimeType: detectSupportedImageMimeType(bytes) ?? "application/octet-stream" };
 }
 
 export async function readClipboardImage(options?: {
@@ -268,16 +266,17 @@ export async function readClipboardImage(options?: {
 		const wsl = isWSL(env);
 		const wayland = isWaylandSession(env);
 
-		if (wayland || wsl) {
-			image = readClipboardImageViaWlPaste() ?? readClipboardImageViaXclip();
+		image =
+			wayland || wsl
+				? (readClipboardImageViaWlPaste() ?? readClipboardImageViaXclip())
+				: readClipboardImageViaXclip();
+
+		if (!image) {
+			image = await readClipboardImageViaNativeClipboard();
 		}
 
 		if (!image && wsl) {
 			image = readClipboardImageViaPowerShell();
-		}
-
-		if (!image && !wayland) {
-			image = (await readClipboardImageViaNativeClipboard()) ?? readClipboardImageViaXclip();
 		}
 	} else {
 		image = await readClipboardImageViaNativeClipboard();
@@ -287,7 +286,7 @@ export async function readClipboardImage(options?: {
 		return null;
 	}
 
-	// Convert unsupported formats (e.g., BMP from WSLg) to PNG
+	// Convert unsupported formats (e.g., Windows DIB data wrapped as BMP) to PNG
 	if (!isSupportedImageMimeType(image.mimeType)) {
 		const pngBytes = await convertToPng(image.bytes);
 		if (!pngBytes) {
