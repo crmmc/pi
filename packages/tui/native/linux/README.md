@@ -7,7 +7,9 @@ These N-API helpers provide read-only clipboard access for Linux terminals witho
 
 The helpers intentionally do not write clipboard data. Coding-agent retains its existing `wl-copy`, `xclip`, `xsel`, Termux, and OSC 52 write paths, avoiding resident native clipboard-owner threads.
 
-Both helpers are linked without a direct libc dependency. The same prebuild for an architecture can therefore load on glibc and musl as long as the corresponding display client library is installed. The loader tries Wayland first when `WAYLAND_DISPLAY` is set, then X11 when `DISPLAY` is set.
+Both helpers are linked without a direct libc dependency. The same prebuild for an architecture can therefore load on glibc and musl as long as the corresponding display client library is installed. The loader tries Wayland first when `WAYLAND_DISPLAY` is set, then X11 when `DISPLAY` is set. It caches modules, but retries display availability on each lookup.
+
+TUI exposes `getNativeClipboard()`, or `getNativeClipboard("wayland" | "x11")` to select a specific Linux backend. Its synchronous `getText()` and `getImage()` methods return `null` when the requested content is absent and throw on read failures. Image discovery and reading share one operation, without a separate image probe. Coding-agent tries each display's command-line reader and native reader before falling back to the next display.
 
 The build generates temporary protocol bindings with `wayland-scanner` from the XML specifications under `protocol/`; only the specifications and handwritten implementation are checked in.
 

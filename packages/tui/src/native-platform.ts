@@ -6,141 +6,68 @@ const cjsRequire = createRequire(import.meta.url);
 
 export type ModifierKey = "shift" | "command" | "control" | "option";
 
-export interface NativeClipboardReader {
-	getText(): string;
-	hasImage(): boolean;
-	getImageBinary(): Uint8Array;
+export interface NativeClipboard {
+	/** Null means the clipboard has no text; failures throw. */
+	getText(): string | null;
+	/** Null means the clipboard has no image; failures throw. */
+	getImage(): Uint8Array | null;
+	/** Linux uses command-line tools to retain clipboard ownership instead. */
+	setText?(text: string): void;
 }
 
-export interface NativeClipboard extends NativeClipboardReader {
-	setText(text: string): void;
-}
-
-type NativePlatformHelper = {
+type NativePlatformHelper = NativeClipboard & {
 	enableVirtualTerminalInput?: () => boolean;
 	isModifierPressed?: (name: ModifierKey) => boolean;
 	isClipboardAvailable?: () => boolean;
-	getClipboardText?: () => string;
-	setClipboardText?: (text: string) => void;
-	hasClipboardImage?: () => boolean;
-	getClipboardImage?: () => Uint8Array;
 };
 
-let nativePlatformHelper: NativePlatformHelper | null | undefined;
-let nativeClipboardHelper: NativePlatformHelper | null | undefined;
-let nativeClipboardReader: NativeClipboardReader | null | undefined;
-let nativeClipboard: NativeClipboard | null | undefined;
+// Cache module loading, not display availability: a disconnected display can recover.
+const helpers = new Map<string, NativePlatformHelper | undefined>();
 
-function isNativePlatformHelper(value: unknown): value is NativePlatformHelper {
-	if (typeof value !== "object" || value === null) return false;
-	const candidate = value as Record<string, unknown>;
-	return (
-		typeof candidate.isModifierPressed === "function" ||
-		typeof candidate.enableVirtualTerminalInput === "function" ||
-		typeof candidate.getClipboardText === "function"
+function loadNativePlatformHelper(platform: string, suffix = ""): NativePlatformHelper | undefined {
+	const arch = process.arch;
+	if (arch !== "x64" && arch !== "arm64") return undefined;
+	const nativePath = path.join(
+		"native",
+		platform,
+		"prebuilds",
+		`${platform}-${arch}`,
+		`${platform}-platform${suffix}.node`,
 	);
-}
+	if (helpers.has(nativePath)) return helpers.get(nativePath);
 
-function loadNativePlatformHelper(nativePath: string): NativePlatformHelper | undefined {
 	for (const modulePath of getNativeModuleCandidates(nativePath)) {
 		try {
-			const helper = cjsRequire(modulePath) as unknown;
-			if (isNativePlatformHelper(helper)) return helper;
+			const helper = cjsRequire(modulePath) as Partial<NativePlatformHelper> | null;
+			if (typeof helper?.getText === "function" && typeof helper.getImage === "function") {
+				helpers.set(nativePath, helper as NativePlatformHelper);
+				return helper as NativePlatformHelper;
+			}
 		} catch {
 			// Try the next possible packaging location.
 		}
 	}
+	helpers.set(nativePath, undefined);
 	return undefined;
 }
 
 export function getNativePlatformHelper(): NativePlatformHelper | undefined {
-	if (nativePlatformHelper !== undefined) return nativePlatformHelper ?? undefined;
-	nativePlatformHelper = null;
-
-	const arch = process.arch;
-	if (arch !== "x64" && arch !== "arm64") return undefined;
-
-	let nativePath: string;
-	if (process.platform === "darwin") {
-		nativePath = path.join("native", "darwin", "prebuilds", `darwin-${arch}`, "darwin-platform.node");
-	} else if (process.platform === "win32") {
-		nativePath = path.join("native", "win32", "prebuilds", `win32-${arch}`, "win32-platform.node");
-	} else {
-		return undefined;
-	}
-
-	nativePlatformHelper = loadNativePlatformHelper(nativePath) ?? null;
-	return nativePlatformHelper ?? undefined;
+	if (process.platform !== "darwin" && process.platform !== "win32") return undefined;
+	return loadNativePlatformHelper(process.platform);
 }
 
-function getNativeClipboardHelper(): NativePlatformHelper | undefined {
-	if (nativeClipboardHelper !== undefined) return nativeClipboardHelper ?? undefined;
-	nativeClipboardHelper = null;
+/** Select a native clipboard, optionally restricting Linux access to one display backend. */
+export function getNativeClipboard(backend?: "wayland" | "x11"): NativeClipboard | undefined {
+	if (process.platform !== "linux") return backend ? undefined : getNativePlatformHelper();
 
-	const arch = process.arch;
-	if (arch !== "x64" && arch !== "arm64") return undefined;
-
-	if (process.platform !== "linux") {
-		nativeClipboardHelper = getNativePlatformHelper() ?? null;
-		return nativeClipboardHelper ?? undefined;
-	}
-
-	const nativePaths: string[] = [];
-	if (process.env.WAYLAND_DISPLAY) {
-		nativePaths.push(path.join("native", "linux", "prebuilds", `linux-${arch}`, "linux-platform-wayland.node"));
-	}
-	if (process.env.DISPLAY) {
-		nativePaths.push(path.join("native", "linux", "prebuilds", `linux-${arch}`, "linux-platform-x11.node"));
-	}
-
-	for (const nativePath of nativePaths) {
-		const helper = loadNativePlatformHelper(nativePath);
-		if (!helper?.isClipboardAvailable) continue;
+	for (const candidate of backend ? [backend] : ["wayland", "x11"]) {
+		if (!process.env[candidate === "wayland" ? "WAYLAND_DISPLAY" : "DISPLAY"]) continue;
+		const helper = loadNativePlatformHelper("linux", `-${candidate}`);
 		try {
-			if (helper.isClipboardAvailable()) {
-				nativeClipboardHelper = helper;
-				return helper;
-			}
+			if (helper?.isClipboardAvailable?.()) return helper;
 		} catch {
 			// Try the next display backend.
 		}
 	}
-
 	return undefined;
-}
-
-export function getNativeClipboardReader(): NativeClipboardReader | undefined {
-	if (nativeClipboardReader !== undefined) return nativeClipboardReader ?? undefined;
-	nativeClipboardReader = null;
-
-	const helper = getNativeClipboardHelper();
-	if (!helper?.getClipboardText || !helper.hasClipboardImage || !helper.getClipboardImage) {
-		return undefined;
-	}
-
-	const getText = helper.getClipboardText;
-	const hasImage = helper.hasClipboardImage;
-	const getImageBinary = helper.getClipboardImage;
-	nativeClipboardReader = {
-		getText: () => getText(),
-		hasImage: () => hasImage(),
-		getImageBinary: () => getImageBinary(),
-	};
-	return nativeClipboardReader;
-}
-
-export function getNativeClipboard(): NativeClipboard | undefined {
-	if (nativeClipboard !== undefined) return nativeClipboard ?? undefined;
-	nativeClipboard = null;
-
-	const reader = getNativeClipboardReader();
-	const helper = getNativeClipboardHelper();
-	if (!reader || !helper?.setClipboardText) return undefined;
-
-	const setText = helper.setClipboardText;
-	nativeClipboard = {
-		...reader,
-		setText: (text) => setText(text),
-	};
-	return nativeClipboard;
 }

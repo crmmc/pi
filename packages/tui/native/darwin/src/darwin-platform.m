@@ -1,44 +1,9 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
-#include <dlfcn.h>
-#include <stdbool.h>
-#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define NAPI_AUTO_LENGTH ((size_t)-1)
-
-typedef void* napi_env;
-typedef void* napi_value;
-typedef void* napi_callback_info;
-typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
-typedef int (*napi_create_buffer_copy_fn)(napi_env, size_t, const void*, void**, napi_value*);
-typedef int (*napi_create_function_fn)(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
-typedef int (*napi_create_string_utf8_fn)(napi_env, const char*, size_t, napi_value*);
-typedef int (*napi_get_boolean_fn)(napi_env, bool, napi_value*);
-typedef int (*napi_get_cb_info_fn)(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
-typedef int (*napi_get_undefined_fn)(napi_env, napi_value*);
-typedef int (*napi_get_value_string_utf8_fn)(napi_env, napi_value, char*, size_t, size_t*);
-typedef int (*napi_set_named_property_fn)(napi_env, napi_value, const char*, napi_value);
-typedef int (*napi_throw_error_fn)(napi_env, const char*, const char*);
-
-static void* node_symbol(const char* name) {
-    return dlsym(RTLD_DEFAULT, name);
-}
-
-static napi_value undefined_value(napi_env env) {
-    napi_get_undefined_fn napi_get_undefined = (napi_get_undefined_fn)node_symbol("napi_get_undefined");
-    napi_value result = 0;
-    if (napi_get_undefined) napi_get_undefined(env, &result);
-    return result;
-}
-
-static napi_value fail(napi_env env, const char* message) {
-    napi_throw_error_fn napi_throw_error = (napi_throw_error_fn)node_symbol("napi_throw_error");
-    if (napi_throw_error) napi_throw_error(env, 0, message);
-    return undefined_value(env);
-}
+#include "../../napi.h"
 
 static CGEventFlags modifier_mask_for_name(const char* name) {
     if (strcmp(name, "shift") == 0) return kCGEventFlagMaskShift;
@@ -82,7 +47,7 @@ static napi_value get_clipboard_text(napi_env env, napi_callback_info info) {
     (void)info;
     @autoreleasepool {
         NSString* text = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-        if (!text) return fail(env, "Clipboard does not contain text");
+        if (!text) return null_value(env);
 
         const char* utf8 = text.UTF8String;
         if (!utf8) return fail(env, "Could not encode clipboard text");
@@ -134,26 +99,13 @@ static napi_value set_clipboard_text(napi_env env, napi_callback_info info) {
     return undefined_value(env);
 }
 
-static napi_value has_clipboard_image(napi_env env, napi_callback_info info) {
-    (void)info;
-    bool available = false;
-    @autoreleasepool {
-        NSArray* types = @[ NSPasteboardTypePNG, NSPasteboardTypeTIFF ];
-        available = [[NSPasteboard generalPasteboard] availableTypeFromArray:types] != nil;
-    }
-
-    napi_get_boolean_fn napi_get_boolean = (napi_get_boolean_fn)node_symbol("napi_get_boolean");
-    napi_value result = 0;
-    if (!napi_get_boolean || napi_get_boolean(env, available, &result) != 0) {
-        return fail(env, "Could not inspect clipboard");
-    }
-    return result;
-}
-
 static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     (void)info;
     @autoreleasepool {
         NSPasteboard* pasteboard = [NSPasteboard generalPasteboard];
+        if (![pasteboard availableTypeFromArray:@[ NSPasteboardTypePNG, NSPasteboardTypeTIFF ]]) {
+            return null_value(env);
+        }
         NSData* png = [pasteboard dataForType:NSPasteboardTypePNG];
         if (!png) {
             NSImage* image = [[NSImage alloc] initWithPasteboard:pasteboard];
@@ -173,23 +125,10 @@ static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     }
 }
 
-static void set_function_export(napi_env env, napi_value exports, const char* name, napi_callback callback) {
-    napi_create_function_fn napi_create_function = (napi_create_function_fn)node_symbol("napi_create_function");
-    napi_set_named_property_fn napi_set_named_property =
-        (napi_set_named_property_fn)node_symbol("napi_set_named_property");
-
-    napi_value fn = 0;
-    if (napi_create_function && napi_set_named_property &&
-        napi_create_function(env, name, NAPI_AUTO_LENGTH, callback, 0, &fn) == 0) {
-        napi_set_named_property(env, exports, name, fn);
-    }
-}
-
-__attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+PI_NAPI_EXPORT napi_value napi_register_module_v1(napi_env env, napi_value exports) {
     set_function_export(env, exports, "isModifierPressed", is_modifier_pressed);
-    set_function_export(env, exports, "getClipboardText", get_clipboard_text);
-    set_function_export(env, exports, "setClipboardText", set_clipboard_text);
-    set_function_export(env, exports, "hasClipboardImage", has_clipboard_image);
-    set_function_export(env, exports, "getClipboardImage", get_clipboard_image);
+    set_function_export(env, exports, "getText", get_clipboard_text);
+    set_function_export(env, exports, "setText", set_clipboard_text);
+    set_function_export(env, exports, "getImage", get_clipboard_image);
     return exports;
 }

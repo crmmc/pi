@@ -57,11 +57,15 @@ static void get_data_device(struct wl_client* client, struct wl_resource* resour
     if (strcmp(mode, "stall-offer") == 0) sleep(10);
     struct wl_resource* dev = wl_resource_create(client, &INTERFACE(device), wl_resource_get_version(resource), id);
     wl_resource_set_implementation(dev, &device_impl, 0, 0);
+    if (strcmp(mode, "empty") == 0) {
+        SEND(device, _send_selection)(dev, 0);
+        return;
+    }
     struct wl_resource* data = wl_resource_create(client, &INTERFACE(offer), 1, 0);
     wl_resource_set_implementation(data, &offer_impl, 0, 0);
     SEND(device, _send_data_offer)(dev, data);
     SEND(offer, _send_offer)(data, "text/plain;charset=utf-8");
-    SEND(offer, _send_offer)(data, "image/png");
+    if (strcmp(mode, "text-only") != 0) SEND(offer, _send_offer)(data, "image/png");
     SEND(device, _send_selection)(dev, data);
 }
 

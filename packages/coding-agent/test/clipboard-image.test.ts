@@ -1,195 +1,144 @@
+import type { NativeClipboard } from "@earendil-works/pi-tui";
 import type { SpawnSyncReturns } from "child_process";
 import { writeFileSync } from "fs";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { readClipboardImage } from "../src/utils/clipboard-image.ts";
 
-const mocks = vi.hoisted(() => {
-	return {
-		spawnSync: vi.fn<(command: string, args: string[], options: unknown) => SpawnSyncReturns<Buffer>>(),
-		clipboard: {
-			hasImage: vi.fn<() => boolean>(),
-			getImageBinary: vi.fn<() => Promise<Uint8Array | null>>(),
-		},
-	};
-});
+const mocks = vi.hoisted(() => ({
+	spawnSync: vi.fn<(command: string, args: string[], options: unknown) => SpawnSyncReturns<Buffer>>(),
+	getImage: vi.fn<() => Uint8Array | null>(),
+	getNativeClipboard: vi.fn<(backend?: "wayland" | "x11") => NativeClipboard | undefined>(),
+}));
 
-vi.mock("child_process", () => {
-	return {
-		spawnSync: mocks.spawnSync,
-	};
-});
+vi.mock("child_process", () => ({ spawnSync: mocks.spawnSync }));
+vi.mock("@earendil-works/pi-tui", () => ({ getNativeClipboard: mocks.getNativeClipboard }));
 
-vi.mock("../src/utils/clipboard-native.js", () => {
-	return {
-		getClipboardReader: () => mocks.clipboard,
-	};
-});
-
-function spawnOk(stdout: Buffer): SpawnSyncReturns<Buffer> {
+function spawnResult(stdout: Buffer, status = 0): SpawnSyncReturns<Buffer> {
 	return {
 		pid: 123,
 		output: [Buffer.alloc(0), stdout, Buffer.alloc(0)],
 		stdout,
 		stderr: Buffer.alloc(0),
-		status: 0,
+		status,
 		signal: null,
 	};
 }
 
-function spawnError(error: Error): SpawnSyncReturns<Buffer> {
-	return {
-		pid: 123,
-		output: [Buffer.alloc(0), Buffer.alloc(0), Buffer.alloc(0)],
-		stdout: Buffer.alloc(0),
-		stderr: Buffer.alloc(0),
-		status: null,
-		signal: null,
-		error,
-	};
-}
+const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
 
 describe("readClipboardImage", () => {
 	beforeEach(() => {
-		vi.resetModules();
-		mocks.spawnSync.mockReset();
-		mocks.clipboard.hasImage.mockReset();
-		mocks.clipboard.getImageBinary.mockReset();
+		vi.resetAllMocks();
+		mocks.spawnSync.mockReturnValue(spawnResult(Buffer.alloc(0), 1));
+		mocks.getImage.mockReturnValue(png);
+		mocks.getNativeClipboard.mockReturnValue({ getText: () => null, getImage: mocks.getImage });
 	});
 
-	test("Wayland: uses wl-paste and never calls clipboard", async () => {
-		mocks.clipboard.hasImage.mockImplementation(() => {
-			throw new Error("clipboard.hasImage should not be called on Wayland");
+	test("Wayland: uses wl-paste without the native clipboard", async () => {
+		mocks.spawnSync.mockImplementation((command, args) => {
+			expect(command).toBe("wl-paste");
+			return spawnResult(args[0] === "--list-types" ? Buffer.from("text/plain\nimage/png\n") : Buffer.from(png));
 		});
-
-		mocks.spawnSync.mockImplementation((command, args, _options) => {
-			if (command === "wl-paste" && args[0] === "--list-types") {
-				return spawnOk(Buffer.from("text/plain\nimage/png\n", "utf-8"));
-			}
-			if (command === "wl-paste" && args[0] === "--type") {
-				return spawnOk(Buffer.from([1, 2, 3]));
-			}
-			throw new Error(`Unexpected spawnSync call: ${command} ${args.join(" ")}`);
-		});
-
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
 		const result = await readClipboardImage({ platform: "linux", env: { WAYLAND_DISPLAY: "1" } });
-		expect(result).not.toBeNull();
-		expect(result?.mimeType).toBe("image/png");
-		expect(Array.from(result?.bytes ?? [])).toEqual([1, 2, 3]);
+		expect(result).toEqual({ bytes: png, mimeType: "image/png" });
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
 	});
 
-	test("Wayland: falls back to xclip when wl-paste is missing", async () => {
-		mocks.clipboard.hasImage.mockImplementation(() => {
-			throw new Error("clipboard.hasImage should not be called on Wayland");
-		});
-
-		const enoent = new Error("spawn ENOENT");
-		(enoent as { code?: string }).code = "ENOENT";
-
-		mocks.spawnSync.mockImplementation((command, args, _options) => {
-			if (command === "wl-paste") {
-				return spawnError(enoent);
-			}
-
-			if (command === "xclip" && args.includes("TARGETS")) {
-				return spawnOk(Buffer.from("image/png\n", "utf-8"));
-			}
-
-			if (command === "xclip" && args.includes("image/png")) {
-				return spawnOk(Buffer.from([9, 8]));
-			}
-
-			return spawnOk(Buffer.alloc(0));
-		});
-
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-		const result = await readClipboardImage({ platform: "linux", env: { XDG_SESSION_TYPE: "wayland" } });
-		expect(result).not.toBeNull();
-		expect(result?.mimeType).toBe("image/png");
-		expect(Array.from(result?.bytes ?? [])).toEqual([9, 8]);
+	test("Wayland: tries the native reader before stale X11 images", async () => {
+		const result = await readClipboardImage({ platform: "linux", env: { WAYLAND_DISPLAY: "1", DISPLAY: ":0" } });
+		expect(result).toEqual({ bytes: png, mimeType: "image/png" });
+		expect(mocks.getNativeClipboard).toHaveBeenCalledExactlyOnceWith("wayland");
+		expect(mocks.getImage).toHaveBeenCalledOnce();
+		expect(mocks.spawnSync).toHaveBeenCalledOnce();
 	});
 
-	test("WSL: passes PowerShell path directly instead of through a custom env var", async () => {
-		mocks.clipboard.hasImage.mockReturnValue(false);
+	for (const native of [false, true]) {
+		test(`Wayland: an empty ${native ? "native" : "wl-paste"} clipboard does not fall through to X11`, async () => {
+			if (native) mocks.getImage.mockReturnValue(null);
+			else mocks.spawnSync.mockReturnValue(spawnResult(Buffer.from("text/plain\n")));
+			expect(
+				await readClipboardImage({ platform: "linux", env: { WAYLAND_DISPLAY: "1", DISPLAY: ":0" } }),
+			).toBeNull();
+			expect(mocks.spawnSync).toHaveBeenCalledOnce();
+			if (native) expect(mocks.getNativeClipboard).toHaveBeenCalledExactlyOnceWith("wayland");
+			else expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
+		});
+	}
 
+	test("Wayland: falls back to X11 when both Wayland readers are unavailable", async () => {
+		mocks.getNativeClipboard.mockReturnValue(undefined);
+		mocks.spawnSync.mockImplementation((command, args) => {
+			if (command === "wl-paste") return spawnResult(Buffer.alloc(0), 1);
+			return spawnResult(args.includes("TARGETS") ? Buffer.from("image/png\n") : Buffer.from(png));
+		});
+		expect(await readClipboardImage({ platform: "linux", env: { WAYLAND_DISPLAY: "1" } })).toEqual({
+			bytes: png,
+			mimeType: "image/png",
+		});
+		expect(mocks.getNativeClipboard).toHaveBeenCalledExactlyOnceWith("wayland");
+	});
+
+	test("WSL: passes the PowerShell path directly instead of through a custom env var", async () => {
+		mocks.getImage.mockReturnValue(null);
 		let tmpFile: string | undefined;
 		mocks.spawnSync.mockImplementation((command, args, options) => {
-			if (command === "wl-paste" || command === "xclip") {
-				return spawnOk(Buffer.alloc(0));
-			}
-
+			if (command === "wl-paste" || command === "xclip") return spawnResult(Buffer.alloc(0));
 			if (command === "wslpath") {
 				tmpFile = args[1];
-				return spawnOk(Buffer.from("C:\\Users\\O'Hare\\clip.png\n", "utf-8"));
+				return spawnResult(Buffer.from("C:\\Users\\O'Hare\\clip.png\n"));
 			}
-
 			if (command === "powershell.exe") {
 				const spawnOptions = options as { env?: NodeJS.ProcessEnv };
 				expect(spawnOptions.env?.PI_WSL_CLIPBOARD_IMAGE_PATH).toBeUndefined();
 				expect(args[2]).toContain("$path = 'C:\\Users\\O''Hare\\clip.png'");
-				if (!tmpFile) {
-					throw new Error("wslpath should be called before powershell.exe");
-				}
-				writeFileSync(tmpFile, Buffer.from([4, 5, 6]));
-				return spawnOk(Buffer.from("ok\n", "utf-8"));
+				if (!tmpFile) throw new Error("wslpath should be called before powershell.exe");
+				writeFileSync(tmpFile, png);
+				return spawnResult(Buffer.from("ok\n"));
 			}
-
-			throw new Error(`Unexpected spawnSync call: ${command} ${args.join(" ")}`);
+			throw new Error(`Unexpected command: ${command}`);
 		});
-
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-		const result = await readClipboardImage({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } });
-		expect(result).not.toBeNull();
-		expect(result?.mimeType).toBe("image/png");
-		expect(Array.from(result?.bytes ?? [])).toEqual([4, 5, 6]);
+		expect(await readClipboardImage({ platform: "linux", env: { WSL_DISTRO_NAME: "Ubuntu" } })).toEqual({
+			bytes: new Uint8Array(png),
+			mimeType: "image/png",
+		});
 	});
 
-	test("Non-Wayland Linux: uses xclip and never calls the native clipboard", async () => {
-		mocks.clipboard.hasImage.mockImplementation(() => {
-			throw new Error("clipboard.hasImage should not be called when xclip succeeds");
+	test("X11: uses xclip before the native reader", async () => {
+		mocks.spawnSync.mockImplementation((command, args) => {
+			expect(command).toBe("xclip");
+			return spawnResult(args.includes("TARGETS") ? Buffer.from("image/png\n") : Buffer.from(png));
 		});
-		mocks.spawnSync.mockImplementation((command, args, _options) => {
-			if (command === "xclip" && args.includes("TARGETS")) {
-				return spawnOk(Buffer.from("image/png\n", "utf-8"));
-			}
-			if (command === "xclip" && args.includes("image/png")) {
-				return spawnOk(Buffer.from([8, 9]));
-			}
-			throw new Error(`Unexpected spawnSync call: ${command} ${args.join(" ")}`);
-		});
-
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-		const result = await readClipboardImage({ platform: "linux", env: {} });
-		expect(result).not.toBeNull();
-		expect(result?.mimeType).toBe("image/png");
-		expect(Array.from(result?.bytes ?? [])).toEqual([8, 9]);
+		expect(await readClipboardImage({ platform: "linux", env: {} })).toEqual({ bytes: png, mimeType: "image/png" });
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
 	});
 
-	test("Linux: falls back to the native reader when clipboard tools are unavailable", async () => {
-		mocks.spawnSync.mockImplementation(() => spawnError(new Error("clipboard tool unavailable")));
-		mocks.clipboard.hasImage.mockReturnValue(true);
-		mocks.clipboard.getImageBinary.mockResolvedValue(
-			new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]),
-		);
-
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-		const result = await readClipboardImage({ platform: "linux", env: { WAYLAND_DISPLAY: "wayland-0" } });
-		expect(result?.mimeType).toBe("image/png");
-		expect(mocks.clipboard.hasImage).toHaveBeenCalledOnce();
-		expect(mocks.clipboard.getImageBinary).toHaveBeenCalledOnce();
+	test("X11: an empty clipboard stops fallback without probing every image type", async () => {
+		mocks.spawnSync.mockReturnValue(spawnResult(Buffer.from("UTF8_STRING\n")));
+		expect(await readClipboardImage({ platform: "linux", env: {} })).toBeNull();
+		expect(mocks.spawnSync).toHaveBeenCalledOnce();
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
 	});
 
-	test("macOS: uses the native clipboard", async () => {
-		mocks.spawnSync.mockImplementation(() => {
-			throw new Error("spawnSync should not be called when the native clipboard returns an image");
+	test("X11: falls back to the native reader when xclip is unavailable", async () => {
+		expect(await readClipboardImage({ platform: "linux", env: { DISPLAY: ":0" } })).toEqual({
+			bytes: png,
+			mimeType: "image/png",
 		});
-		mocks.clipboard.hasImage.mockReturnValue(true);
-		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
-		mocks.clipboard.getImageBinary.mockResolvedValue(png);
+		expect(mocks.getNativeClipboard).toHaveBeenCalledExactlyOnceWith("x11");
+		expect(mocks.getImage).toHaveBeenCalledOnce();
+	});
 
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-		const result = await readClipboardImage({ platform: "darwin", env: {} });
-		expect(result).not.toBeNull();
-		expect(result?.mimeType).toBe("image/png");
-		expect(Array.from(result?.bytes ?? [])).toEqual(Array.from(png));
+	for (const platform of ["darwin", "win32"] as const) {
+		test(`${platform}: reads the native clipboard once without command fallbacks`, async () => {
+			expect(await readClipboardImage({ platform, env: {} })).toEqual({ bytes: png, mimeType: "image/png" });
+			expect(mocks.getImage).toHaveBeenCalledOnce();
+			expect(mocks.spawnSync).not.toHaveBeenCalled();
+		});
+	}
+
+	test("Termux does not read image clipboards", async () => {
+		expect(await readClipboardImage({ platform: "linux", env: { TERMUX_VERSION: "0.119" } })).toBeNull();
+		expect(mocks.getNativeClipboard).not.toHaveBeenCalled();
+		expect(mocks.spawnSync).not.toHaveBeenCalled();
 	});
 });

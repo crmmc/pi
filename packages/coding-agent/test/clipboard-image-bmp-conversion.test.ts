@@ -5,10 +5,12 @@
  * This tests the fix for WSL2/WSLg where clipboard often provides image/bmp
  * instead of image/png.
  */
+import type * as ChildProcess from "child_process";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { readClipboardImage } from "../src/utils/clipboard-image.ts";
 
 const mocks = vi.hoisted(() => ({
-	getImageBinary: vi.fn<() => Promise<Uint8Array>>(),
+	getImage: vi.fn<() => Uint8Array>(),
 }));
 
 function createTinyBmp1x1Red24bpp(): Uint8Array {
@@ -47,7 +49,7 @@ function createTinyBmp1x1Red24bpp(): Uint8Array {
 
 // Mock wl-paste to return BMP
 vi.mock("child_process", async () => {
-	const actual = await vi.importActual<typeof import("child_process")>("child_process");
+	const actual = await vi.importActual<typeof ChildProcess>("child_process");
 	return {
 		...actual,
 		spawnSync: vi.fn((command: string, args: string[]) => {
@@ -63,21 +65,16 @@ vi.mock("child_process", async () => {
 });
 
 // Mock the native clipboard reader used after command fallbacks.
-vi.mock("../src/utils/clipboard-native.js", () => ({
-	getClipboardReader: () => ({
-		hasImage: vi.fn(() => true),
-		getImageBinary: mocks.getImageBinary,
-	}),
+vi.mock("@earendil-works/pi-tui", () => ({
+	getNativeClipboard: () => ({ getImage: mocks.getImage }),
 }));
 
 describe("readClipboardImage BMP conversion", () => {
 	beforeEach(() => {
-		mocks.getImageBinary.mockReset();
+		mocks.getImage.mockReset();
 	});
 
 	test("converts BMP to PNG on Wayland/WSLg", async () => {
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
-
 		// Simulate Wayland session (WSLg)
 		const image = await readClipboardImage({
 			env: { WAYLAND_DISPLAY: "wayland-0" },
@@ -95,8 +92,7 @@ describe("readClipboardImage BMP conversion", () => {
 	});
 
 	test("converts BMP returned by the Windows native helper to PNG", async () => {
-		mocks.getImageBinary.mockResolvedValue(createTinyBmp1x1Red24bpp());
-		const { readClipboardImage } = await import("../src/utils/clipboard-image.ts");
+		mocks.getImage.mockReturnValue(createTinyBmp1x1Red24bpp());
 
 		const image = await readClipboardImage({ env: {}, platform: "win32" });
 

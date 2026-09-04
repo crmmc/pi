@@ -1,7 +1,4 @@
-#include <dlfcn.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "../../napi.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -10,20 +7,7 @@
 #include "ext-data-control-client-protocol.h"
 #include "wlr-data-control-client-protocol.h"
 
-#define NAPI_AUTO_LENGTH ((size_t)-1)
 #define MAX_OFFERS 8
-
-typedef void* napi_env;
-typedef void* napi_value;
-typedef void* napi_callback_info;
-typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
-typedef int (*napi_create_buffer_copy_fn)(napi_env, size_t, const void*, void**, napi_value*);
-typedef int (*napi_create_function_fn)(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
-typedef int (*napi_create_string_utf8_fn)(napi_env, const char*, size_t, napi_value*);
-typedef int (*napi_get_boolean_fn)(napi_env, bool, napi_value*);
-typedef int (*napi_get_undefined_fn)(napi_env, napi_value*);
-typedef int (*napi_set_named_property_fn)(napi_env, napi_value, const char*, napi_value);
-typedef int (*napi_throw_error_fn)(napi_env, const char*, const char*);
 
 typedef enum {
     DATA_CONTROL_NONE,
@@ -57,23 +41,6 @@ typedef struct {
     unsigned char* data;
     size_t length;
 } clipboard_bytes;
-
-static void* node_symbol(const char* name) {
-    return dlsym(RTLD_DEFAULT, name);
-}
-
-static napi_value undefined_value(napi_env env) {
-    napi_get_undefined_fn napi_get_undefined = (napi_get_undefined_fn)node_symbol("napi_get_undefined");
-    napi_value result = 0;
-    if (napi_get_undefined) napi_get_undefined(env, &result);
-    return result;
-}
-
-static napi_value fail(napi_env env, const char* message) {
-    napi_throw_error_fn napi_throw_error = (napi_throw_error_fn)node_symbol("napi_throw_error");
-    if (napi_throw_error) napi_throw_error(env, 0, message);
-    return undefined_value(env);
-}
 
 static int text_mime_rank(const char* mime, const char** canonical) {
     if (strcmp(mime, "text/plain;charset=utf-8") == 0) {
@@ -452,7 +419,8 @@ static bool read_clipboard(bool image, clipboard_bytes* result) {
     const char* mime = opened && state.selection
         ? (image ? state.selection->image_mime : state.selection->text_mime)
         : 0;
-    bool received = mime && receive_offer(&state, state.selection, mime, result);
+    // An open clipboard without this format is empty, not a failed transfer.
+    bool received = opened && (!mime || receive_offer(&state, state.selection, mime, result));
     close_clipboard(&state);
     return received;
 }
@@ -474,7 +442,8 @@ static napi_value is_clipboard_available(napi_env env, napi_callback_info info) 
 static napi_value get_clipboard_text(napi_env env, napi_callback_info info) {
     (void)info;
     clipboard_bytes contents = {0};
-    if (!read_clipboard(false, &contents)) return fail(env, "Wayland clipboard does not contain text");
+    if (!read_clipboard(false, &contents)) return fail(env, "Could not read Wayland clipboard text");
+    if (!contents.data) return null_value(env);
 
     napi_create_string_utf8_fn napi_create_string_utf8 =
         (napi_create_string_utf8_fn)node_symbol("napi_create_string_utf8");
@@ -486,25 +455,11 @@ static napi_value get_clipboard_text(napi_env env, napi_callback_info info) {
     return status == 0 ? result : fail(env, "Could not create clipboard text");
 }
 
-static napi_value has_clipboard_image(napi_env env, napi_callback_info info) {
-    (void)info;
-    clipboard_state state;
-    bool opened = open_clipboard(&state);
-    bool available = opened && state.selection && state.selection->image_mime;
-    close_clipboard(&state);
-
-    napi_get_boolean_fn napi_get_boolean = (napi_get_boolean_fn)node_symbol("napi_get_boolean");
-    napi_value result = 0;
-    if (!napi_get_boolean || napi_get_boolean(env, available, &result) != 0) {
-        return fail(env, "Could not inspect Wayland clipboard");
-    }
-    return result;
-}
-
 static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     (void)info;
     clipboard_bytes contents = {0};
-    if (!read_clipboard(true, &contents)) return fail(env, "Wayland clipboard does not contain an image");
+    if (!read_clipboard(true, &contents)) return fail(env, "Could not read Wayland clipboard image");
+    if (!contents.data) return null_value(env);
 
     napi_create_buffer_copy_fn napi_create_buffer_copy =
         (napi_create_buffer_copy_fn)node_symbol("napi_create_buffer_copy");
@@ -516,21 +471,9 @@ static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     return status == 0 ? result : fail(env, "Could not create clipboard image buffer");
 }
 
-static void set_function_export(napi_env env, napi_value exports, const char* name, napi_callback callback) {
-    napi_create_function_fn napi_create_function = (napi_create_function_fn)node_symbol("napi_create_function");
-    napi_set_named_property_fn napi_set_named_property =
-        (napi_set_named_property_fn)node_symbol("napi_set_named_property");
-    napi_value fn = 0;
-    if (napi_create_function && napi_set_named_property &&
-        napi_create_function(env, name, NAPI_AUTO_LENGTH, callback, 0, &fn) == 0) {
-        napi_set_named_property(env, exports, name, fn);
-    }
-}
-
-__attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+PI_NAPI_EXPORT napi_value napi_register_module_v1(napi_env env, napi_value exports) {
     set_function_export(env, exports, "isClipboardAvailable", is_clipboard_available);
-    set_function_export(env, exports, "getClipboardText", get_clipboard_text);
-    set_function_export(env, exports, "hasClipboardImage", has_clipboard_image);
-    set_function_export(env, exports, "getClipboardImage", get_clipboard_image);
+    set_function_export(env, exports, "getText", get_clipboard_text);
+    set_function_export(env, exports, "getImage", get_clipboard_image);
     return exports;
 }

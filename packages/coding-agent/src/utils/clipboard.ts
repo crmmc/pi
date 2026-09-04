@@ -1,7 +1,7 @@
+import { getNativeClipboard } from "@earendil-works/pi-tui";
 import { type ExecFileSyncOptionsWithStringEncoding, execFileSync, execSync, spawn } from "child_process";
 import { platform } from "os";
 import { isWaylandSession } from "./clipboard-image.ts";
-import { getClipboardReader, getClipboardWriter } from "./clipboard-native.ts";
 
 type NativeClipboardExecOptions = {
 	input: string;
@@ -60,6 +60,15 @@ function readX11ClipboardText(): ClipboardReadResult {
 	return { ok: false };
 }
 
+function readNativeClipboardText(backend?: "wayland" | "x11"): ClipboardReadResult {
+	try {
+		const clipboard = getNativeClipboard(backend);
+		return clipboard ? { ok: true, text: clipboard.getText() || null } : { ok: false };
+	} catch {
+		return { ok: false };
+	}
+}
+
 /** Read plain text from the system clipboard. */
 export async function readClipboardText(): Promise<string | null> {
 	if (platform() === "linux") {
@@ -68,26 +77,24 @@ export async function readClipboardText(): Promise<string | null> {
 			if (result.ok) return result.text;
 		}
 
-		if (isWaylandSession() && process.env.WAYLAND_DISPLAY) {
+		if (process.env.WAYLAND_DISPLAY) {
 			const result = readClipboardTextCommand("wl-paste", ["--no-newline", "--type", "text"]);
 			if (result.ok) return result.text;
+			const native = readNativeClipboardText("wayland");
+			if (native.ok) return native.text;
 		}
 
 		if (process.env.DISPLAY) {
 			const result = readX11ClipboardText();
 			if (result.ok) return result.text;
+			const native = readNativeClipboardText("x11");
+			if (native.ok) return native.text;
 		}
-	}
-
-	const clipboardReader = getClipboardReader();
-	if (!clipboardReader) return null;
-
-	try {
-		const text = await clipboardReader.getText();
-		return text || null;
-	} catch {
 		return null;
 	}
+
+	const result = readNativeClipboardText();
+	return result.ok ? result.text : null;
 }
 
 export async function copyToClipboard(text: string): Promise<void> {
@@ -103,9 +110,9 @@ export async function copyToClipboard(text: string): Promise<void> {
 	// clipboard selection ownership after this function returns.
 	try {
 		if (p !== "linux") {
-			const clipboardWriter = getClipboardWriter();
-			if (clipboardWriter) {
-				await clipboardWriter.setText(text);
+			const clipboard = getNativeClipboard();
+			if (clipboard?.setText) {
+				clipboard.setText(text);
 				copied = true;
 			}
 		}

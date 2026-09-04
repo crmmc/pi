@@ -1,109 +1,13 @@
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+#include "../../napi.h"
 
-#define WINAPI __stdcall
-#define STD_INPUT_HANDLE ((uint32_t)-10)
-#define INVALID_HANDLE_VALUE ((void*)(intptr_t)-1)
-#define ENABLE_VIRTUAL_TERMINAL_INPUT 0x0200
-#define VK_SHIFT 0x10
-#define VK_CONTROL 0x11
-#define VK_MENU 0x12
-#define VK_LSHIFT 0xa0
-#define VK_RSHIFT 0xa1
-#define VK_LCONTROL 0xa2
-#define VK_RCONTROL 0xa3
-#define VK_LMENU 0xa4
-#define VK_RMENU 0xa5
-#define VK_LWIN 0x5b
-#define VK_RWIN 0x5c
-#define GMEM_FIXED 0x0000
-#define GMEM_MOVEABLE 0x0002
-#define CF_UNICODETEXT 13
-#define CF_DIB 8
-#define CF_DIBV5 17
-#define BI_BITFIELDS 3
+#ifndef BI_ALPHABITFIELDS
 #define BI_ALPHABITFIELDS 6
-#define TRUE 1
-#define NAPI_AUTO_LENGTH ((size_t)-1)
+#endif
+
 #define KEY_PRESSED_MASK 0x8000
 #define OPEN_CLIPBOARD_ATTEMPTS 10
 #define OPEN_CLIPBOARD_RETRY_MS 5
 #define BITMAP_FILE_HEADER_SIZE 14
-
-typedef int BOOL;
-typedef int16_t SHORT;
-typedef uint32_t DWORD;
-typedef uint32_t UINT;
-typedef void* HANDLE;
-typedef void* HGLOBAL;
-typedef void* HWND;
-typedef void* HINSTANCE;
-typedef void* HMODULE;
-typedef void* LPVOID;
-typedef void (__stdcall *FARPROC)(void);
-
-__declspec(dllimport) BOOL WINAPI CloseClipboard(void);
-__declspec(dllimport) HWND WINAPI CreateWindowExW(DWORD extended_style, const uint16_t* class_name,
-    const uint16_t* window_name, DWORD style, int x, int y, int width, int height,
-    HWND parent, void* menu, HINSTANCE instance, void* parameter);
-__declspec(dllimport) BOOL WINAPI DestroyWindow(HWND window);
-__declspec(dllimport) BOOL WINAPI EmptyClipboard(void);
-__declspec(dllimport) HANDLE WINAPI GetClipboardData(UINT format);
-__declspec(dllimport) BOOL WINAPI GetConsoleMode(HANDLE console, DWORD* mode);
-__declspec(dllimport) HMODULE WINAPI GetModuleHandleA(const char* module_name);
-__declspec(dllimport) FARPROC WINAPI GetProcAddress(HMODULE module, const char* name);
-__declspec(dllimport) HANDLE WINAPI GetStdHandle(DWORD standard_handle);
-__declspec(dllimport) HGLOBAL WINAPI GlobalAlloc(UINT flags, size_t bytes);
-__declspec(dllimport) HGLOBAL WINAPI GlobalFree(HGLOBAL memory);
-__declspec(dllimport) void* WINAPI GlobalLock(HGLOBAL memory);
-__declspec(dllimport) size_t WINAPI GlobalSize(HGLOBAL memory);
-__declspec(dllimport) BOOL WINAPI GlobalUnlock(HGLOBAL memory);
-__declspec(dllimport) BOOL WINAPI IsClipboardFormatAvailable(UINT format);
-__declspec(dllimport) HMODULE WINAPI LoadLibraryA(const char* library_name);
-__declspec(dllimport) BOOL WINAPI OpenClipboard(void* owner);
-__declspec(dllimport) UINT WINAPI RegisterClipboardFormatW(const uint16_t* format_name);
-__declspec(dllimport) HANDLE WINAPI SetClipboardData(UINT format, HANDLE memory);
-__declspec(dllimport) BOOL WINAPI SetConsoleMode(HANDLE console, DWORD mode);
-__declspec(dllimport) void WINAPI Sleep(DWORD milliseconds);
-
-typedef void* napi_env;
-typedef void* napi_value;
-typedef void* napi_callback_info;
-typedef napi_value (__cdecl *napi_callback)(napi_env, napi_callback_info);
-typedef int (__cdecl *napi_create_buffer_copy_fn)(napi_env, size_t, const void*, void**, napi_value*);
-typedef int (__cdecl *napi_create_function_fn)(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
-typedef int (__cdecl *napi_create_string_utf16_fn)(napi_env, const uint16_t*, size_t, napi_value*);
-typedef int (__cdecl *napi_get_boolean_fn)(napi_env, bool, napi_value*);
-typedef int (__cdecl *napi_get_cb_info_fn)(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
-typedef int (__cdecl *napi_get_undefined_fn)(napi_env, napi_value*);
-typedef int (__cdecl *napi_get_value_string_utf16_fn)(napi_env, napi_value, uint16_t*, size_t, size_t*);
-typedef int (__cdecl *napi_get_value_string_utf8_fn)(napi_env, napi_value, char*, size_t, size_t*);
-typedef int (__cdecl *napi_set_named_property_fn)(napi_env, napi_value, const char*, napi_value);
-typedef int (__cdecl *napi_throw_error_fn)(napi_env, const char*, const char*);
-typedef SHORT (WINAPI *get_async_key_state_fn)(int);
-
-static void* node_symbol(const char* name) {
-    HMODULE module = GetModuleHandleA(0);
-    void* proc = module ? (void*)GetProcAddress(module, name) : 0;
-    if (proc) return proc;
-
-    module = GetModuleHandleA("node.dll");
-    return module ? (void*)GetProcAddress(module, name) : 0;
-}
-
-static napi_value undefined_value(napi_env env) {
-    napi_get_undefined_fn napi_get_undefined = (napi_get_undefined_fn)node_symbol("napi_get_undefined");
-    napi_value result = 0;
-    if (napi_get_undefined) napi_get_undefined(env, &result);
-    return result;
-}
-
-static napi_value fail(napi_env env, const char* message) {
-    napi_throw_error_fn napi_throw_error = (napi_throw_error_fn)node_symbol("napi_throw_error");
-    if (napi_throw_error) napi_throw_error(env, 0, message);
-    return undefined_value(env);
-}
 
 static int string_equals(const char* left, const char* right) {
     while (*left && *right && *left == *right) {
@@ -113,23 +17,8 @@ static int string_equals(const char* left, const char* right) {
     return *left == 0 && *right == 0;
 }
 
-static get_async_key_state_fn get_async_key_state_symbol(void) {
-    static int loaded = 0;
-    static get_async_key_state_fn get_async_key_state = 0;
-
-    if (!loaded) {
-        HMODULE module = GetModuleHandleA("user32.dll");
-        if (!module) module = LoadLibraryA("user32.dll");
-        get_async_key_state = module ? (get_async_key_state_fn)GetProcAddress(module, "GetAsyncKeyState") : 0;
-        loaded = 1;
-    }
-
-    return get_async_key_state;
-}
-
 static int is_key_pressed(int virtual_key) {
-    get_async_key_state_fn get_async_key_state = get_async_key_state_symbol();
-    return get_async_key_state && (((unsigned short)get_async_key_state(virtual_key)) & KEY_PRESSED_MASK) != 0;
+    return ((unsigned short)GetAsyncKeyState(virtual_key) & KEY_PRESSED_MASK) != 0;
 }
 
 static int is_modifier_name_pressed(const char* name) {
@@ -195,6 +84,10 @@ static napi_value __cdecl get_clipboard_text(napi_env env, napi_callback_info in
     (void)info;
     if (!open_clipboard(0)) return fail(env, "Could not open clipboard");
 
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        CloseClipboard();
+        return null_value(env);
+    }
     HGLOBAL handle = (HGLOBAL)GetClipboardData(CF_UNICODETEXT);
     const uint16_t* text = handle ? (const uint16_t*)GlobalLock(handle) : 0;
     if (!text) {
@@ -245,9 +138,8 @@ static napi_value __cdecl set_clipboard_text(napi_env env, napi_callback_info in
 
     // EmptyClipboard must assign a real owner for SetClipboardData to succeed.
     // A message-only window also works when Node has no console window.
-    static const uint16_t window_class[] = {'S', 'T', 'A', 'T', 'I', 'C', 0};
-    HWND owner = CreateWindowExW(0, window_class, 0, 0, 0, 0, 0, 0,
-        (HWND)(intptr_t)-3, 0, GetModuleHandleA(0), 0); // HWND_MESSAGE
+    HWND owner = CreateWindowExW(0, L"STATIC", 0, 0, 0, 0, 0, 0,
+        HWND_MESSAGE, 0, GetModuleHandleA(0), 0);
     if (!owner) {
         GlobalFree(handle);
         return fail(env, "Could not create clipboard owner window");
@@ -268,25 +160,9 @@ static napi_value __cdecl set_clipboard_text(napi_env env, napi_callback_info in
 }
 
 static UINT png_clipboard_format(void) {
-    static const uint16_t png_name[] = {'P', 'N', 'G', 0};
     static UINT format = 0;
-    if (!format) format = RegisterClipboardFormatW(png_name);
+    if (!format) format = RegisterClipboardFormatW(L"PNG");
     return format;
-}
-
-static napi_value __cdecl has_clipboard_image(napi_env env, napi_callback_info info) {
-    (void)info;
-    UINT png_format = png_clipboard_format();
-    bool available = (png_format && IsClipboardFormatAvailable(png_format)) ||
-        IsClipboardFormatAvailable(CF_DIBV5) ||
-        IsClipboardFormatAvailable(CF_DIB);
-
-    napi_get_boolean_fn napi_get_boolean = (napi_get_boolean_fn)node_symbol("napi_get_boolean");
-    napi_value result = 0;
-    if (!napi_get_boolean || napi_get_boolean(env, available, &result) != 0) {
-        return fail(env, "Could not inspect clipboard");
-    }
-    return result;
 }
 
 static uint16_t read_u16(const uint8_t* data) {
@@ -341,6 +217,11 @@ static napi_value __cdecl get_clipboard_image(napi_env env, napi_callback_info i
     if (!open_clipboard(0)) return fail(env, "Could not open clipboard");
 
     UINT png_format = png_clipboard_format();
+    if (!(png_format && IsClipboardFormatAvailable(png_format)) &&
+        !IsClipboardFormatAvailable(CF_DIBV5) && !IsClipboardFormatAvailable(CF_DIB)) {
+        CloseClipboard();
+        return null_value(env);
+    }
     HGLOBAL handle = png_format && IsClipboardFormatAvailable(png_format)
         ? (HGLOBAL)GetClipboardData(png_format)
         : 0;
@@ -393,18 +274,6 @@ static napi_value __cdecl get_clipboard_image(napi_env env, napi_callback_info i
     return status == 0 ? result : fail(env, "Could not create clipboard image buffer");
 }
 
-static void set_function_export(napi_env env, napi_value exports, const char* name, napi_callback callback) {
-    napi_create_function_fn napi_create_function = (napi_create_function_fn)node_symbol("napi_create_function");
-    napi_set_named_property_fn napi_set_named_property =
-        (napi_set_named_property_fn)node_symbol("napi_set_named_property");
-
-    napi_value fn = 0;
-    if (napi_create_function && napi_set_named_property &&
-        napi_create_function(env, name, NAPI_AUTO_LENGTH, callback, 0, &fn) == 0) {
-        napi_set_named_property(env, exports, name, fn);
-    }
-}
-
 BOOL WINAPI _DllMainCRTStartup(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     (void)instance;
     (void)reason;
@@ -412,12 +281,11 @@ BOOL WINAPI _DllMainCRTStartup(HINSTANCE instance, DWORD reason, LPVOID reserved
     return TRUE;
 }
 
-__declspec(dllexport) napi_value __cdecl napi_register_module_v1(napi_env env, napi_value exports) {
+PI_NAPI_EXPORT napi_value PI_NAPI_CALL napi_register_module_v1(napi_env env, napi_value exports) {
     set_function_export(env, exports, "enableVirtualTerminalInput", enable_virtual_terminal_input);
     set_function_export(env, exports, "isModifierPressed", is_modifier_pressed);
-    set_function_export(env, exports, "getClipboardText", get_clipboard_text);
-    set_function_export(env, exports, "setClipboardText", set_clipboard_text);
-    set_function_export(env, exports, "hasClipboardImage", has_clipboard_image);
-    set_function_export(env, exports, "getClipboardImage", get_clipboard_image);
+    set_function_export(env, exports, "getText", get_clipboard_text);
+    set_function_export(env, exports, "setText", set_clipboard_text);
+    set_function_export(env, exports, "getImage", get_clipboard_image);
     return exports;
 }

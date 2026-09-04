@@ -1,30 +1,13 @@
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
-#include <dlfcn.h>
+#include "../../napi.h"
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "clipboard-io.h"
-
-#define NAPI_AUTO_LENGTH ((size_t)-1)
-
-typedef void* napi_env;
-typedef void* napi_value;
-typedef void* napi_callback_info;
-typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
-typedef int (*napi_create_buffer_copy_fn)(napi_env, size_t, const void*, void**, napi_value*);
-typedef int (*napi_create_function_fn)(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
-typedef int (*napi_create_string_utf8_fn)(napi_env, const char*, size_t, napi_value*);
-typedef int (*napi_get_boolean_fn)(napi_env, bool, napi_value*);
-typedef int (*napi_get_undefined_fn)(napi_env, napi_value*);
-typedef int (*napi_set_named_property_fn)(napi_env, napi_value, const char*, napi_value);
-typedef int (*napi_throw_error_fn)(napi_env, const char*, const char*);
 
 typedef struct {
     unsigned char* data;
@@ -43,23 +26,6 @@ typedef struct {
     xcb_atom_t incr;
     int64_t deadline;
 } x11_clipboard;
-
-static void* node_symbol(const char* name) {
-    return dlsym(RTLD_DEFAULT, name);
-}
-
-static napi_value undefined_value(napi_env env) {
-    napi_get_undefined_fn napi_get_undefined = (napi_get_undefined_fn)node_symbol("napi_get_undefined");
-    napi_value result = 0;
-    if (napi_get_undefined) napi_get_undefined(env, &result);
-    return result;
-}
-
-static napi_value fail(napi_env env, const char* message) {
-    napi_throw_error_fn napi_throw_error = (napi_throw_error_fn)node_symbol("napi_throw_error");
-    if (napi_throw_error) napi_throw_error(env, 0, message);
-    return undefined_value(env);
-}
 
 static bool append_bytes(property_data* result, const unsigned char* bytes, size_t length) {
     if (length > MAX_CLIPBOARD_BYTES - result->length) return false;
@@ -160,7 +126,8 @@ static bool request_selection(x11_clipboard* clipboard, xcb_atom_t target, prope
         bool received = event->property != XCB_NONE;
         free(event);
         if (!matches) continue;
-        if (!received || !read_property(clipboard, false, result)) return false;
+        if (!received) return true; // No owner, or the owner does not offer this target.
+        if (!read_property(clipboard, false, result)) return false;
         break;
     }
     if (result->type != clipboard->incr) return true;
@@ -223,7 +190,7 @@ static void close_clipboard(x11_clipboard* clipboard) {
     if (clipboard->connection) xcb_disconnect(clipboard->connection);
 }
 
-static xcb_atom_t preferred_target(x11_clipboard* clipboard, bool image) {
+static bool preferred_target(x11_clipboard* clipboard, bool image, xcb_atom_t* target) {
     static const char* text_types[] = {
         "text/plain;charset=utf-8",
         "text/plain;charset=UTF-8",
@@ -244,32 +211,34 @@ static xcb_atom_t preferred_target(x11_clipboard* clipboard, bool image) {
     xcb_atom_t wanted[6];
     for (size_t index = 0; index < type_count; index++) {
         wanted[index] = intern_atom(clipboard, types[index]);
-        if (wanted[index] == XCB_NONE) return XCB_NONE;
+        if (wanted[index] == XCB_NONE) return false;
     }
 
     property_data targets = {0};
-    if (request_selection(clipboard, clipboard->targets, &targets) &&
-        targets.type == XCB_ATOM_ATOM && targets.format == 32 &&
-        targets.items == targets.length / sizeof(xcb_atom_t) && targets.length % sizeof(xcb_atom_t) == 0) {
+    bool received = request_selection(clipboard, clipboard->targets, &targets);
+    bool valid = targets.type == XCB_ATOM_ATOM && targets.format == 32 &&
+        targets.items == targets.length / sizeof(xcb_atom_t) && targets.length % sizeof(xcb_atom_t) == 0;
+    if (received && valid) {
         xcb_atom_t* offered = (xcb_atom_t*)targets.data;
         for (size_t wanted_index = 0; wanted_index < type_count; wanted_index++) {
             for (uint32_t offered_index = 0; offered_index < targets.items; offered_index++) {
                 if (offered[offered_index] == wanted[wanted_index]) {
                     free(targets.data);
-                    return wanted[wanted_index];
+                    *target = wanted[wanted_index];
+                    return true;
                 }
             }
         }
     }
     free(targets.data);
-    return XCB_NONE;
+    return received && (valid || targets.type == XCB_NONE);
 }
 
 static bool read_clipboard(bool image, property_data* result) {
     x11_clipboard clipboard;
-    bool opened = open_clipboard(&clipboard);
-    xcb_atom_t target = opened ? preferred_target(&clipboard, image) : XCB_NONE;
-    bool received = target != XCB_NONE && request_selection(&clipboard, target, result);
+    xcb_atom_t target = XCB_NONE;
+    bool received = open_clipboard(&clipboard) && preferred_target(&clipboard, image, &target) &&
+        (target == XCB_NONE || request_selection(&clipboard, target, result));
     close_clipboard(&clipboard);
     if (!received) {
         free(result->data);
@@ -278,7 +247,7 @@ static bool read_clipboard(bool image, property_data* result) {
     return received;
 }
 
-typedef enum { CLIPBOARD_PROBE, CLIPBOARD_TEXT, CLIPBOARD_HAS_IMAGE, CLIPBOARD_IMAGE } clipboard_operation;
+typedef enum { CLIPBOARD_PROBE, CLIPBOARD_TEXT, CLIPBOARD_IMAGE } clipboard_operation;
 
 typedef struct {
     size_t length;
@@ -316,8 +285,7 @@ static bool run_clipboard_operation(clipboard_operation operation, property_data
             success = read_clipboard(operation == CLIPBOARD_IMAGE, &contents);
         } else {
             x11_clipboard clipboard;
-            bool opened = open_clipboard(&clipboard);
-            contents.type = opened && (operation == CLIPBOARD_PROBE || preferred_target(&clipboard, true) != XCB_NONE);
+            contents.type = open_clipboard(&clipboard);
             close_clipboard(&clipboard);
         }
         clipboard_response response = {0};
@@ -377,6 +345,10 @@ static napi_value get_clipboard_text(napi_env env, napi_callback_info info) {
     (void)info;
     property_data contents = {0};
     if (!run_clipboard_operation(CLIPBOARD_TEXT, &contents)) return fail(env, "Could not read X11 clipboard text");
+    if (contents.type == XCB_NONE) {
+        free(contents.data);
+        return null_value(env);
+    }
 
     // X11 STRING is ISO-8859-1, not UTF-8. Both N-API constructors share a signature.
     napi_create_string_utf8_fn create_string = (napi_create_string_utf8_fn)node_symbol(
@@ -388,25 +360,14 @@ static napi_value get_clipboard_text(napi_env env, napi_callback_info info) {
     return status == 0 ? result : fail(env, "Could not create clipboard text");
 }
 
-static napi_value has_clipboard_image(napi_env env, napi_callback_info info) {
-    (void)info;
-    property_data contents = {0};
-    if (!run_clipboard_operation(CLIPBOARD_HAS_IMAGE, &contents)) return fail(env, "Could not inspect X11 clipboard");
-    bool available = contents.type != 0;
-    free(contents.data);
-
-    napi_get_boolean_fn napi_get_boolean = (napi_get_boolean_fn)node_symbol("napi_get_boolean");
-    napi_value result = 0;
-    if (!napi_get_boolean || napi_get_boolean(env, available, &result) != 0) {
-        return fail(env, "Could not inspect X11 clipboard");
-    }
-    return result;
-}
-
 static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     (void)info;
     property_data contents = {0};
     if (!run_clipboard_operation(CLIPBOARD_IMAGE, &contents)) return fail(env, "Could not read X11 clipboard image");
+    if (contents.type == XCB_NONE) {
+        free(contents.data);
+        return null_value(env);
+    }
 
     napi_create_buffer_copy_fn napi_create_buffer_copy =
         (napi_create_buffer_copy_fn)node_symbol("napi_create_buffer_copy");
@@ -418,21 +379,9 @@ static napi_value get_clipboard_image(napi_env env, napi_callback_info info) {
     return status == 0 ? result : fail(env, "Could not create clipboard image buffer");
 }
 
-static void set_function_export(napi_env env, napi_value exports, const char* name, napi_callback callback) {
-    napi_create_function_fn napi_create_function = (napi_create_function_fn)node_symbol("napi_create_function");
-    napi_set_named_property_fn napi_set_named_property =
-        (napi_set_named_property_fn)node_symbol("napi_set_named_property");
-    napi_value fn = 0;
-    if (napi_create_function && napi_set_named_property &&
-        napi_create_function(env, name, NAPI_AUTO_LENGTH, callback, 0, &fn) == 0) {
-        napi_set_named_property(env, exports, name, fn);
-    }
-}
-
-__attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+PI_NAPI_EXPORT napi_value napi_register_module_v1(napi_env env, napi_value exports) {
     set_function_export(env, exports, "isClipboardAvailable", is_clipboard_available);
-    set_function_export(env, exports, "getClipboardText", get_clipboard_text);
-    set_function_export(env, exports, "hasClipboardImage", has_clipboard_image);
-    set_function_export(env, exports, "getClipboardImage", get_clipboard_image);
+    set_function_export(env, exports, "getText", get_clipboard_text);
+    set_function_export(env, exports, "getImage", get_clipboard_image);
     return exports;
 }

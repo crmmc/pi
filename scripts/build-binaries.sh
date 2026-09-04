@@ -150,25 +150,11 @@ for platform in "${PLATFORMS[@]}"; do
     cp -r docs "$OUTPUT_DIR/$platform/"
     cp -r examples "$OUTPUT_DIR/$platform/"
 
-    # Copy native platform helpers next to compiled binaries.
-    if [[ "$platform" == darwin-* ]]; then
-        mkdir -p "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform"
-        cp ../tui/native/darwin/prebuilds/$platform/darwin-platform.node "$OUTPUT_DIR/$platform/native/darwin/prebuilds/$platform/"
-    fi
-    if [[ "$platform" == linux-* ]]; then
-        mkdir -p "$OUTPUT_DIR/$platform/native/linux/prebuilds/$platform"
-        cp ../tui/native/linux/prebuilds/$platform/linux-platform-wayland.node "$OUTPUT_DIR/$platform/native/linux/prebuilds/$platform/"
-        cp ../tui/native/linux/prebuilds/$platform/linux-platform-x11.node "$OUTPUT_DIR/$platform/native/linux/prebuilds/$platform/"
-    fi
-    if [[ "$platform" == windows-* ]]; then
-        if [[ "$platform" == "windows-arm64" ]]; then
-            win32_arch_dir="win32-arm64"
-        else
-            win32_arch_dir="win32-x64"
-        fi
-        mkdir -p "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir"
-        cp ../tui/native/win32/prebuilds/$win32_arch_dir/win32-platform.node "$OUTPUT_DIR/$platform/native/win32/prebuilds/$win32_arch_dir/"
-    fi
+    # Copy the selected architecture's native platform helpers next to the executable.
+    native_platform="${platform/windows-/win32-}"
+    native_path="native/${native_platform%-*}/prebuilds"
+    mkdir -p "$OUTPUT_DIR/$platform/$native_path"
+    cp -R "../tui/$native_path/$native_platform" "$OUTPUT_DIR/$platform/$native_path/"
 done
 
 # Create archives

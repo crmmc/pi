@@ -120,6 +120,7 @@ required_paths=(
     "packages/ai/src/models.generated.ts"
     "packages/ai/src/image-models.generated.ts"
     "packages/ai/src/providers/data/.manifest.json"
+    "packages/tui/native/napi.h"
     "packages/tui/native/darwin/src/darwin-platform.m"
     "packages/tui/native/darwin/prebuilds/darwin-arm64/darwin-platform.node"
     "packages/tui/native/darwin/prebuilds/darwin-x64/darwin-platform.node"

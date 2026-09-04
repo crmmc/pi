@@ -27,7 +27,7 @@ const dependenciesAvailable =
 
 interface ReaderResult {
 	ok: boolean;
-	value?: string | boolean;
+	value?: string | boolean | null;
 	length?: number;
 	hash?: string;
 	error?: string;
@@ -134,12 +134,26 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 				WAYLAND_SOCKET: undefined,
 			};
 			await startServer(t, join(directory, `server-${protocol}`), ["normal"], env);
-			assert.equal((await readClipboard("wayland", "getClipboardText", env)).value, "Wayland café");
-			assert.equal((await readClipboard("wayland", "hasClipboardImage", env)).value, true);
+			assert.equal((await readClipboard("wayland", "getText", env)).value, "Wayland café");
 			assert.equal(
-				(await readClipboard("wayland", "getClipboardImage", env)).hash,
+				(await readClipboard("wayland", "getImage", env)).hash,
 				createHash("sha256").update("image bytes").digest("hex"),
 			);
+		});
+	}
+
+	for (const mode of ["empty", "text-only"]) {
+		it(`returns null for absent Wayland images: ${mode}`, async (t) => {
+			const env = {
+				...process.env,
+				XDG_RUNTIME_DIR: directory,
+				WAYLAND_DISPLAY: "wayland-test",
+				WAYLAND_SOCKET: undefined,
+			};
+			await startServer(t, join(directory, "server-ext"), [mode], env);
+			assert.deepEqual(await readClipboard("wayland", "getImage", env), { ok: true, value: null });
+			if (mode === "empty")
+				assert.deepEqual(await readClipboard("wayland", "getText", env), { ok: true, value: null });
 		});
 	}
 
@@ -153,7 +167,7 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 			};
 			await startServer(t, join(directory, "server-ext"), [mode], env);
 			const started = performance.now();
-			const result = await readClipboard("wayland", "getClipboardText", env);
+			const result = await readClipboard("wayland", "getText", env);
 			assert.equal(result.ok, false);
 			assert.match(result.error ?? "", /Wayland clipboard/);
 			assert.ok(performance.now() - started < 3500, "The whole operation must use one 2-second deadline");
@@ -164,7 +178,7 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 		assert.equal(execFileSync(join(directory, "x11-test"), ["metadata"], { encoding: "utf8" }).trim(), "validated");
 	});
 
-	for (const method of ["isClipboardAvailable", "getClipboardText", "hasClipboardImage", "getClipboardImage"]) {
+	for (const method of ["isClipboardAvailable", "getText", "getImage"]) {
 		it(`bounds stalled X11 connection setup: ${method}`, async (t) => {
 			const sockets = new Set<Socket>();
 			let connections = 0;
@@ -206,9 +220,23 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 			stdio: ["pipe", "ignore", "ignore"],
 			timeout: 5000,
 		});
-		const result = await readClipboard("x11", "getClipboardText", env);
+		const result = await readClipboard("x11", "getText", env);
 		assert.equal(result.ok, true, result.error);
 		assert.equal(result.value, "café £ÿ");
+	});
+
+	it("returns null for empty X11 clipboards and text-only selections", async (t) => {
+		const server = await startServer(t, "Xvfb", ["-displayfd", "1", "-nolisten", "tcp"], process.env);
+		const env = { ...process.env, DISPLAY: `:${server.ready}` };
+		assert.deepEqual(await readClipboard("x11", "getText", env), { ok: true, value: null });
+		assert.deepEqual(await readClipboard("x11", "getImage", env), { ok: true, value: null });
+		execFileSync("xclip", ["-selection", "clipboard", "-in", "-t", "UTF8_STRING"], {
+			env,
+			input: "text only",
+			stdio: ["pipe", "ignore", "ignore"],
+			timeout: 5000,
+		});
+		assert.deepEqual(await readClipboard("x11", "getImage", env), { ok: true, value: null });
 	});
 
 	it("preserves X11 Unicode and incremental text/image transfers", async (t) => {
@@ -220,9 +248,9 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 		);
 		const env = { ...process.env, DISPLAY: `:${server.ready}` };
 		for (const [target, method, bytes] of [
-			["UTF8_STRING", "getClipboardText", Buffer.from("café 日本語")],
-			["UTF8_STRING", "getClipboardText", Buffer.alloc(4 * 1024 * 1024, 120)],
-			["image/png", "getClipboardImage", Buffer.alloc(4 * 1024 * 1024, 123)],
+			["UTF8_STRING", "getText", Buffer.from("café 日本語")],
+			["UTF8_STRING", "getText", Buffer.alloc(4 * 1024 * 1024, 120)],
+			["image/png", "getImage", Buffer.alloc(4 * 1024 * 1024, 123)],
 		] as const) {
 			execFileSync("xclip", ["-selection", "clipboard", "-in", "-t", target], {
 				env,
@@ -242,7 +270,7 @@ describe("native Linux clipboard", { skip: !dependenciesAvailable, timeout: 6000
 		const env = { ...process.env, DISPLAY: `:${server.ready}` };
 		const owner = await startServer(t, join(directory, "x11-test"), ["idle"], env);
 		const requested = once(owner.child.stdout, "data");
-		const result = readClipboard("x11", "getClipboardText", env);
+		const result = readClipboard("x11", "getText", env);
 		await requested;
 		server.child.kill("SIGKILL");
 		const failure = await result;
