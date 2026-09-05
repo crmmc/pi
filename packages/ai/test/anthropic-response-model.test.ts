@@ -5,6 +5,7 @@ import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel } from "../src/compat.ts";
 import type { Model } from "../src/types.ts";
 
+// Regression test for earendil-works/pi#9188.
 // Proxies and relays (new-api, gateways) commonly rewrite the model name in
 // the streamed message_start event. `model` must stay pinned to the requested
 // id with the echoed name surfaced on `responseModel`, mirroring the
