@@ -595,14 +595,21 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.responseId = event.message.id;
 					const transformations = event.message.input_transformations;
 					if (Array.isArray(transformations)) inputTransformations = transformations;
-					output.model = event.message.model;
+					const responseModel = event.message.model;
+					// Keep `model` pinned to the requested id and surface the
+					// response-echoed name on `responseModel` (mirrors the
+					// openai-completions adapter). Overwriting `model` breaks
+					// transformMessages' same-model check, downgrading signed
+					// thinking blocks to plain text on replay behind proxies
+					// that relabel the served model.
+					if (responseModel && responseModel !== model.id) output.responseModel = responseModel;
 					const fallbackCost =
-						output.model === model.id
+						responseModel === model.id
 							? undefined
 							: model.compat?.allowedFallbackModels?.find(
-									(fallback) => fallback.provider === model.provider && fallback.model === output.model,
+									(fallback) => fallback.provider === model.provider && fallback.model === responseModel,
 								)?.cost;
-					usageModel = fallbackCost ? { ...model, id: output.model, cost: fallbackCost } : model;
+					usageModel = fallbackCost ? { ...model, id: responseModel, cost: fallbackCost } : model;
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
 					output.usage.input = event.message.usage.input_tokens || 0;
