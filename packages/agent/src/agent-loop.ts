@@ -574,6 +574,10 @@ async function executeToolCallsSequential(
 		}
 	}
 
+	if (signal?.aborted) {
+		await finalizeUnexecutedToolCalls(toolCalls, finalizedCalls.length, messages, emit);
+	}
+
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(finalizedCalls),
@@ -650,6 +654,10 @@ async function executeToolCallsParallel(
 		messages.push(toolResultMessage);
 	}
 
+	if (signal?.aborted) {
+		await finalizeUnexecutedToolCalls(toolCalls, orderedFinalizedCalls.length, messages, emit);
+	}
+
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
@@ -684,6 +692,46 @@ type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<Finalize
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+}
+
+/**
+ * An abort mid-batch leaves tool calls that never executed without results in the
+ * persisted history. The request layer papers over this per request by inserting
+ * "No result provided" placeholders (packages/ai/src/api/transform-messages.ts),
+ * so the model never learns the tools were aborted and the session file stays
+ * incomplete. Synthesize an aborted error result for every unanswered call so the
+ * history records the real outcome, mirroring the in-batch abort handling above.
+ *
+ * Both execution strategies answer calls strictly in order (each loop iteration
+ * pushes its outcome before checking the abort signal), so the unanswered calls
+ * are exactly the tail of `toolCalls` past `answeredCount`. The synthesized
+ * outcomes intentionally do not join `finalizedCalls`: batch termination must
+ * reflect only what actually executed, so an abort over an all-terminating batch
+ * still ends the run immediately instead of spawning an extra post-abort turn.
+ */
+async function finalizeUnexecutedToolCalls(
+	toolCalls: AgentToolCall[],
+	answeredCount: number,
+	messages: ToolResultMessage[],
+	emit: AgentEventSink,
+): Promise<void> {
+	for (const toolCall of toolCalls.slice(answeredCount)) {
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+		const finalized: FinalizedToolCallOutcome = {
+			toolCall,
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+		await emitToolExecutionEnd(finalized, emit);
+		const toolResultMessage = createToolResultMessage(finalized);
+		await emitToolResultMessage(toolResultMessage, emit);
+		messages.push(toolResultMessage);
+	}
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {

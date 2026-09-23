@@ -4,6 +4,7 @@ import {
 	EventStream,
 	type Message,
 	type Model,
+	type ToolResultMessage,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -74,6 +75,60 @@ function createUserMessage(text: string): UserMessage {
 		content: text,
 		timestamp: Date.now(),
 	};
+}
+
+/**
+ * Shared provider mock for the abort tests: the first call returns three same-name
+ * tool calls (stopReason toolUse); later calls return an aborted stream. Records
+ * the context of every call so tests can assert what the post-abort round carries.
+ */
+function createAbortTestStreamFn(toolName: string): {
+	streamFn: (model: unknown, context: { messages: AgentMessage[] }, options?: unknown) => MockAssistantStream;
+	getCalls(): number;
+	contexts: Array<{ messages: AgentMessage[] }>;
+} {
+	const contexts: Array<{ messages: AgentMessage[] }> = [];
+	return {
+		contexts,
+		getCalls: () => contexts.length,
+		streamFn: (_model, context) => {
+			const isFirst = contexts.length === 0;
+			contexts.push(context);
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (isFirst) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[
+								{ type: "toolCall", id: "tool-1", name: toolName, arguments: {} },
+								{ type: "toolCall", id: "tool-2", name: toolName, arguments: {} },
+								{ type: "toolCall", id: "tool-3", name: toolName, arguments: {} },
+							],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({
+						type: "error",
+						reason: "aborted",
+						error: { ...createAssistantMessage([], "aborted"), errorMessage: "Operation aborted" },
+					});
+				}
+			});
+			return stream;
+		},
+	};
+}
+
+/** Every toolCall id must have a matching toolResult in the given message list. */
+function answeredToolCallIds(messages: AgentMessage[]): Set<string> {
+	const ids = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "toolResult") ids.add(message.toolCallId);
+	}
+	return ids;
 }
 
 // Simple identity converter for tests - just passes through standard messages
@@ -1109,6 +1164,184 @@ describe("agentLoop with AgentMessage", () => {
 		);
 
 		expect(ordering.slice(-3)).toEqual(["message_end:toolResult", "finishTurn", "turn_end"]);
+	});
+
+	it("abort during sequential tool execution synthesizes results for unexecuted calls", async () => {
+		const toolSchema = Type.Object({});
+		const controller = new AbortController();
+		let executions = 0;
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "aborting",
+			label: "Aborting",
+			description: "Aborts the run mid-batch",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute() {
+				executions++;
+				controller.abort();
+				return { content: [{ type: "text", text: "first done" }], details: {} };
+			},
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const { streamFn, getCalls, contexts } = createAbortTestStreamFn("aborting");
+		const messages = await runAgentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			(event) => {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push(event.message);
+				}
+			},
+			controller.signal,
+			streamFn,
+		);
+
+		// First call executed and aborted the run; the remaining two never ran.
+		expect(executions).toBe(1);
+		// Every tool call is answered: real result first, synthesized aborts after.
+		expect(toolResults).toHaveLength(3);
+		expect(toolResults[0]?.content).toEqual([{ type: "text", text: "first done" }]);
+		expect(toolResults[0]?.isError).toBeFalsy();
+		for (const synthesized of toolResults.slice(1)) {
+			expect(synthesized.isError).toBe(true);
+			expect(synthesized.content).toEqual([{ type: "text", text: "Operation aborted" }]);
+		}
+		// The turn still ends with the aborted assistant message.
+		expect(messages.at(-1)?.role).toBe("assistant");
+		expect(getCalls()).toBe(2);
+		// The post-abort round carries a fully answered history: every toolCall id
+		// has a matching toolResult in the context sent to the provider.
+		expect(contexts).toHaveLength(2);
+		expect(answeredToolCallIds(contexts[1]!.messages)).toEqual(new Set(["tool-1", "tool-2", "tool-3"]));
+	});
+
+	it("abort before a parallel call is pushed synthesizes its result", async () => {
+		const toolSchema = Type.Object({});
+		const controller = new AbortController();
+		let executions = 0;
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const { streamFn, getCalls, contexts } = createAbortTestStreamFn("echo");
+		const messages = await runAgentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			(event) => {
+				if (event.type === "tool_execution_start" && event.toolCallId === "tool-1") {
+					controller.abort();
+				}
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push(event.message);
+				}
+			},
+			controller.signal,
+			streamFn,
+		);
+
+		// tool-1 is answered by the prepare-time abort check; tool-2/3 by the
+		// post-loop synthesis. Nothing executes, and all three results read the same.
+		expect(executions).toBe(0);
+		expect(toolResults).toHaveLength(3);
+		for (const synthesized of toolResults) {
+			expect(synthesized.isError).toBe(true);
+			expect(synthesized.content).toEqual([{ type: "text", text: "Operation aborted" }]);
+		}
+		expect(messages.at(-1)?.role).toBe("assistant");
+		expect(getCalls()).toBe(2);
+		expect(answeredToolCallIds(contexts[1]!.messages)).toEqual(new Set(["tool-1", "tool-2", "tool-3"]));
+	});
+
+	it("abort after a terminating tool still ends the run immediately", async () => {
+		const toolSchema = Type.Object({});
+		const controller = new AbortController();
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "finisher",
+			label: "Finisher",
+			description: "Terminating tool",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute() {
+				controller.abort();
+				return { content: [{ type: "text", text: "done" }], details: {}, terminate: true };
+			},
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const { streamFn, getCalls } = createAbortTestStreamFn("finisher");
+		const messages = await runAgentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			(event) => {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push(event.message);
+				}
+			},
+			controller.signal,
+			streamFn,
+		);
+
+		// The executed call returned terminate: true. The synthesized abort results
+		// for its batch-mates do not weaken batch termination, so the run ends right
+		// after the batch — no extra post-abort turn — while the history still
+		// records a result for every call.
+		expect(toolResults).toHaveLength(3);
+		expect(toolResults[0]?.content).toEqual([{ type: "text", text: "done" }]);
+		expect(getCalls()).toBe(1);
+		expect(messages.at(-1)?.role).toBe("toolResult");
+	});
+
+	it("sequential batch aborted before any execution answers all calls", async () => {
+		const toolSchema = Type.Object({});
+		const controller = new AbortController();
+		let executions = 0;
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute() {
+				executions++;
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		const toolResults: ToolResultMessage[] = [];
+		const { streamFn, getCalls, contexts } = createAbortTestStreamFn("echo");
+		await runAgentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter },
+			(event) => {
+				if (event.type === "tool_execution_start" && event.toolCallId === "tool-1") {
+					controller.abort();
+				}
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push(event.message);
+				}
+			},
+			controller.signal,
+			streamFn,
+		);
+
+		// The abort lands during tool-1's start event; the prepare-time abort check
+		// answers tool-1 and the post-loop synthesis answers tool-2/3.
+		expect(executions).toBe(0);
+		expect(toolResults).toHaveLength(3);
+		for (const synthesized of toolResults) {
+			expect(synthesized.isError).toBe(true);
+		}
+		expect(getCalls()).toBe(2);
+		expect(answeredToolCallIds(contexts[1]!.messages)).toEqual(new Set(["tool-1", "tool-2", "tool-3"]));
 	});
 
 	it.each(["error", "aborted"] as const)(
